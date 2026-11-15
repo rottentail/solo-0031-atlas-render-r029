@@ -23,7 +23,11 @@ func write(w http.ResponseWriter, status int, v any) {
 func fail(w http.ResponseWriter, e error) {
 	var de *model.Error
 	if errors.As(e, &de) {
-		write(w, de.Status, map[string]string{"code": de.Code, "error": de.Message})
+		body := map[string]any{"code": de.Code, "error": de.Message}
+		if de.Details != nil {
+			body["details"] = de.Details
+		}
+		write(w, de.Status, body)
 		return
 	}
 	write(w, 500, map[string]string{"code": "internal", "error": "operation could not be committed"})
@@ -46,6 +50,8 @@ func (a API) Handler() http.Handler {
 	m.HandleFunc("PUT /v1/scenes/{id}", a.putScene)
 	m.HandleFunc("GET /v1/scenes/{id}", a.getScene)
 	m.HandleFunc("POST /v1/scenes/{id}/state", a.sceneState)
+	m.HandleFunc("GET /v1/scenes/{id}/recovery-plan", a.recoveryPlan)
+	m.HandleFunc("POST /v1/scenes/{id}/recovery", a.recoverScene)
 	m.HandleFunc("POST /v1/scenes/{id}/snapshots", a.freeze)
 	m.HandleFunc("PUT /v1/assets/{id}", a.importAsset)
 	m.HandleFunc("POST /v1/assets/{id}/retire", a.retireAsset)

@@ -48,6 +48,30 @@ func (a API) sceneState(w http.ResponseWriter, r *http.Request) {
 	}
 	write(w, 200, v)
 }
+func (a API) recoveryPlan(w http.ResponseWriter, r *http.Request) {
+	v, e := a.Service.RecoveryPlan(r.PathValue("id"))
+	if e != nil {
+		fail(w, e)
+		return
+	}
+	write(w, 200, v)
+}
+func (a API) recoverScene(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Expected     int               `json:"expectedRevision"`
+		Replacements map[string]string `json:"replacements"`
+	}
+	if e := decode(w, r, &b); e != nil {
+		fail(w, e)
+		return
+	}
+	v, _, e := a.Service.Recover(r.PathValue("id"), b.Expected, b.Replacements)
+	if e != nil {
+		fail(w, e)
+		return
+	}
+	write(w, 200, v)
+}
 func (a API) freeze(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Expected int `json:"expectedRevision"`

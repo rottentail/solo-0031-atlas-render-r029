@@ -18,6 +18,7 @@ go run ./cmd/atlas
 ```sh
 python3 scripts/walkthrough.py --workflow submit-render --out var/demo
 python3 scripts/walkthrough.py --workflow retire-asset
+python3 scripts/walkthrough.py --workflow recover-archived
 python3 scripts/walkthrough.py --workflow cancel-render
 python3 scripts/walkthrough.py --workflow retry-render
 python3 scripts/walkthrough.py --workflow recover-render
@@ -35,6 +36,8 @@ python3 scripts/walkthrough.py --workflow compare-renders
 4. `GET /v1/jobs/{id}` 等待 `succeeded`，再读取 `GET /v1/artifacts/{artifactId}`。
 
 同一幂等键和同一请求返回原任务；同键不同请求返回 409。快照包含引用素材的字节，后续场景编辑或素材退役不改变它。撤回快照会阻止新工作，已接受的任务仍使用固定输入。任务取消和结果提交竞争同一个持久状态；终态完成后不可取消。
+
+归档场景恢复时，如果归档期间有素材退役，先用 `GET /v1/scenes/{id}/recovery-plan` 预览哪些图像图层无法继续冻结（含组路径、素材摘要）和当前可用的替换素材，再通过一次 `POST /v1/scenes/{id}/recovery` 在同一事务里完成替换并恢复为新修订。替换不会改写归档文档或任何旧快照；revision过期或替换目标被并行退役时返回带刷新预览的409，可直接带着上下文重试，失败不产生部分写入。演练见 `python3 scripts/walkthrough.py --workflow recover-archived`。
 
 ## 范围与限制
 

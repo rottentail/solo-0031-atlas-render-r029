@@ -118,6 +118,24 @@
       "verification": "python3 scripts/walkthrough.py --workflow archive-scene"
     },
     {
+      "id": "recover-archived",
+      "name": "退役素材引导式归档恢复",
+      "entry": "GET /v1/scenes/{id}/recovery-plan + POST /v1/scenes/{id}/recovery",
+      "success": "预览阻塞图层后一次确认替换可用素材并恢复为新修订，旧快照不变",
+      "failure": "修订过期或替换目标被并行退役时409并返回刷新预览，不产生部分写入",
+      "module_ids": [
+        "httpapi",
+        "service",
+        "scene",
+        "persist"
+      ],
+      "steps": [
+        "经公开HTTP入口完成领域转换",
+        "通过存储或渲染结果观察已提交事实"
+      ],
+      "verification": "python3 scripts/walkthrough.py --workflow recover-archived"
+    },
+    {
       "id": "import-asset",
       "name": "导入位图素材",
       "entry": "PUT /v1/assets/{id}",

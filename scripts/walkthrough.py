@@ -39,6 +39,13 @@ def tiny_png():
     return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 2, 2, 8, 6, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(b'\0' + bytes([240, 40, 80, 255] * 2) + b'\0' + bytes([40, 80, 240, 128] * 2))) + chunk(b'IEND', b'')
 
 
+def solid_png(rgb):
+    def chunk(tag, data):
+        return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', zlib.crc32(tag + data))
+    raw = b''.join(b'\0' + bytes(list(rgb) + [255]) * 2 for _ in range(2))
+    return b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 2, 2, 8, 6, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b'')
+
+
 class Demo:
     def __init__(self, binary, directory):
         self.binary = binary
@@ -102,7 +109,137 @@ class Demo:
         return self.call('POST', '/v1/jobs', {'snapshotId': snapshot['id'], 'scale': scale}, 202, {'Idempotency-Key': key})
 
 
+def run_recover_archived(demo):
+    import threading
+
+    png_beta = solid_png((20, 160, 120))
+    png_gamma = solid_png((10, 10, 10))
+    png_delta = solid_png((90, 90, 200))
+    demo.call('PUT', '/v1/assets/beta', png_beta, 201)
+    demo.call('PUT', '/v1/assets/gamma', png_gamma, 201)
+    demo.call('PUT', '/v1/assets/delta', png_delta, 201)
+    demo.call('PUT', '/v1/assets/alpha', solid_png((200, 30, 60)), 201)
+
+    d = sample()
+    d['layers'].append({'id': 'alpha-img', 'kind': 'image', 'width': 40, 'height': 40, 'assetId': 'alpha',
+                        'opacity': 1, 'transform': {'x': 10, 'y': 10, 'scaleX': 1, 'scaleY': 1, 'degrees': 0}})
+    d['layers'].append({'id': 'gamma-img', 'kind': 'image', 'width': 20, 'height': 20, 'assetId': 'gamma',
+                        'opacity': 1, 'transform': {'x': 80, 'y': 80, 'scaleX': 1, 'scaleY': 1, 'degrees': 0}})
+    scene = demo.call('PUT', '/v1/scenes/emblem', {'name': '归档印记', 'expectedRevision': 0, 'document': d})
+    rev = scene['revision']
+
+    # A frozen snapshot captured before archival must remain renderable and unchanged.
+    frozen = demo.call('POST', '/v1/scenes/emblem/snapshots', {'expectedRevision': rev}, 201)
+    frozen_digest = frozen['digest']
+
+    archived = demo.call('POST', '/v1/scenes/emblem/state',
+                         {'expectedRevision': rev, 'state': 'archived'})
+    arch_rev = archived['revision']
+    demo.call('PUT', '/v1/scenes/emblem',
+              {'name': '归档印记', 'expectedRevision': arch_rev, 'document': d}, 409)
+    demo.call('POST', '/v1/scenes/emblem/snapshots', {'expectedRevision': arch_rev}, 409)
+
+    # The asset goes retired while the scene is archived.
+    demo.call('POST', '/v1/assets/alpha/retire')
+
+    # 1. Recovery preview: only the alpha layer is blocked; the gamma layer stays freezable.
+    plan = demo.call('GET', '/v1/scenes/emblem/recovery-plan')
+    assert plan['state'] == 'archived' and plan['revision'] == arch_rev
+    assert plan['recoverable'] is False
+    assert len(plan['blockedLayers']) == 1
+    blocked = plan['blockedLayers'][0]
+    assert blocked['layerId'] == 'alpha-img' and blocked['assetId'] == 'alpha'
+    assert blocked['reason'] == 'asset retired' and blocked['path'][-1] == 'alpha-img'
+    assert set(plan['availableAssets']) >= {'beta', 'gamma', 'delta'}
+    assert 'alpha' not in plan['availableAssets']
+    # Preview is read-only: nothing moved.
+    assert demo.call('GET', '/v1/scenes/emblem')['revision'] == arch_rev
+
+    # 2. Failures keep the archived context and commit nothing.
+    no_replace = demo.call('POST', '/v1/scenes/emblem/recovery',
+                           {'expectedRevision': arch_rev, 'replacements': {}}, 409)
+    assert no_replace['details']['blockedLayers'][0]['layerId'] == 'alpha-img'
+    demo.call('POST', '/v1/scenes/emblem/recovery',
+              {'expectedRevision': arch_rev, 'replacements': {'alpha': 'alpha'}}, 400)
+    demo.call('POST', '/v1/scenes/emblem/recovery',
+              {'expectedRevision': arch_rev, 'replacements': {'alpha': 'bad id!'}}, 400)
+    demo.call('POST', '/v1/scenes/emblem/recovery',
+              {'expectedRevision': arch_rev, 'replacements': {'alpha': 'ghost'}}, 409)
+    still = demo.call('GET', '/v1/scenes/emblem')
+    assert still['state'] == 'archived' and still['revision'] == arch_rev
+
+    # Replacement target retired between planning and confirmation: refreshed 409, no partial write.
+    demo.call('POST', '/v1/assets/delta/retire')
+    raced = demo.call('POST', '/v1/scenes/emblem/recovery',
+                      {'expectedRevision': arch_rev, 'replacements': {'alpha': 'delta'}}, 409)
+    assert 'delta' not in raced['details']['availableAssets']
+    assert demo.call('GET', '/v1/scenes/emblem')['state'] == 'archived'
+
+    # 3. Parallel recovery with the same expected revision: transactions serialize,
+    #    exactly one confirmation wins and the other's stale attempt cannot overwrite it.
+    barrier = threading.Barrier(2)
+    results = []
+
+    def attempt():
+        barrier.wait(timeout=15)
+        try:
+            results.append(demo.call('POST', '/v1/scenes/emblem/recovery',
+                                     {'expectedRevision': arch_rev,
+                                      'replacements': {'alpha': 'beta'}}, 200))
+        except RuntimeError as error:
+            results.append(error)
+
+    threads = [threading.Thread(target=attempt) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+    successes = [r for r in results if not isinstance(r, RuntimeError)]
+    failures = [r for r in results if isinstance(r, RuntimeError)]
+    assert len(successes) == 1 and len(failures) == 1, failures
+    recovered = successes[0]
+    assert recovered['state'] == 'active' and recovered['revision'] == arch_rev + 1
+    refs = [layer['assetId'] for layer in recovered['document']['layers'] if layer['kind'] == 'image']
+    assert 'alpha' not in refs and 'beta' in refs and 'gamma' in refs
+
+    events = demo.call('GET', '/v1/events')
+    recovered_events = [e for e in events if e['kind'] == 'scene.recovered']
+    assert len(recovered_events) == 1
+    assert [e['sequence'] for e in events] == sorted(e['sequence'] for e in events)
+
+    # Recovery plan is only meaningful while archived.
+    demo.call('GET', '/v1/scenes/emblem/recovery-plan', status=409)
+
+    # 4. Another user's revision is protected: stale expectedRevision cannot overwrite.
+    current = demo.call('GET', '/v1/scenes/emblem')
+    changed = sample()
+    changed['background'] = '#102030'
+    changed['layers'] = list(current['document']['layers'])
+    next_rev = demo.call('PUT', '/v1/scenes/emblem',
+                         {'name': '归档印记', 'expectedRevision': current['revision'],
+                          'document': changed})['revision']
+    demo.call('PUT', '/v1/scenes/emblem',
+              {'name': '过期编辑', 'expectedRevision': current['revision'], 'document': changed}, 409)
+
+    # 5. The old snapshot keeps its own bytes and still renders after asset retirement.
+    assert demo.call('GET', '/v1/snapshots/' + frozen['id'])['digest'] == frozen_digest
+    pinned = demo.wait(demo.submit(frozen, key='frozen-after-retire')['id'])
+    assert pinned['state'] == 'succeeded'
+
+    # 6. A fresh freeze of the recovered document succeeds, then retirement blocks it again.
+    new_snapshot = demo.call('POST', '/v1/scenes/emblem/snapshots',
+                             {'expectedRevision': next_rev}, 201)
+    assert new_snapshot['digest'] != frozen_digest
+    demo.call('POST', '/v1/assets/beta/retire')
+    demo.call('POST', '/v1/scenes/emblem/snapshots', {'expectedRevision': next_rev}, 409)
+    return {'workflow': 'recover-archived', 'recoveredRevision': recovered['revision'],
+            'blockedLayers': 1, 'replacement': 'beta',
+            'oldSnapshotDigest': frozen_digest, 'newSnapshotDigest': new_snapshot['digest']}
+
+
 def run(demo, workflow, out):
+    if workflow == 'recover-archived':
+        return run_recover_archived(demo)
     d = sample()
     put = lambda doc, rev=0: demo.call('PUT', '/v1/scenes/emblem', {'name': '双色印记', 'expectedRevision': rev, 'document': doc})
     scene = put(d)

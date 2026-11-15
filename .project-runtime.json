@@ -21,6 +21,10 @@
       "command": "python3 scripts/walkthrough.py --workflow archive-scene"
     },
     {
+      "workflow_id": "recover-archived",
+      "command": "python3 scripts/walkthrough.py --workflow recover-archived"
+    },
+    {
       "workflow_id": "import-asset",
       "command": "python3 scripts/walkthrough.py --workflow import-asset"
     },

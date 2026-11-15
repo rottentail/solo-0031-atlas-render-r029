@@ -7,6 +7,8 @@
 | PUT /scenes/{id} | name, expectedRevision, document | 完整场景，200 |
 | GET /scenes/{id} | 无 | 完整场景，200 |
 | POST /scenes/{id}/state | expectedRevision, state | 完整场景，200 |
+| GET /scenes/{id}/recovery-plan | 无 | 归档恢复预览（阻塞图层与可用素材），200 |
+| POST /scenes/{id}/recovery | expectedRevision，replacements（退役素材ID→可用素材ID） | 替换并恢复后的完整场景，200 |
 | POST /scenes/{id}/snapshots | expectedRevision | 快照和素材闭包，201 |
 | PUT /assets/{id} | PNG字节 | 素材及base64字节，201 |
 | POST /assets/{id}/retire | 无 | state，200 |
@@ -25,6 +27,10 @@
 | GET /events | 无 | 最多500个有序领域事件 |
 
 `GET /healthz` 不带 `/v1`，返回ready。它表明进程已打开并恢复状态，不包含单独的磁盘可写探测。任务响应省略固定输入的有效载荷，输入细节通过快照接口读取。
+
+归档场景在恢复前先读取 `GET /scenes/{id}/recovery-plan`。预览为只读：`blockedLayers` 按文档顺序列出每个引用退役素材的图像图层（含图层ID、所在组路径path、素材ID与摘要、原因），`availableAssets` 列出当前可作为替换目标的可用素材，`recoverable` 为真时可直接恢复。预览不会修改场景，也不会读取或改写任何快照。
+
+恢复通过一次 `POST /scenes/{id}/recovery` 确认：`replacements` 把每个阻塞图层引用的退役素材ID映射到一个可用素材ID，且必须覆盖全部阻塞素材；退役素材不能替换自身，两个退役素材不能共用同一替换目标。替换在单个持久事务内重写文档并把场景切回active、递增修订；旧快照及其捕获的素材字节保持不变，之后可对恢复后的新修订发起冻结。场景不处于archived返回409；expectedRevision过期、替换目标在确认前被他人退役，或映射不完整时返回409，并在响应`details`中携带刷新后的恢复预览，使调用方可带着上下文重试而不丢失处理位置。输入ID非法返回400，实体不存在返回404。
 
 文档字段：width、height、background、layers。每个图层有id、kind、width、height、transform、opacity、fill；transform包括x、y、scaleX、scaleY、degrees。图层可以有clip（x/y/width/height），group使用children，polygon使用points，image使用assetId。solid颜料有color；linear还包括endColor、from、to。示例是可直接提交的完整请求。
 

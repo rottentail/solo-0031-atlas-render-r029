@@ -123,3 +123,47 @@ func References(d model.Document) []string {
 	walk(d.Layers)
 	return out
 }
+
+// ImageReference identifies one image layer and the group path that contains it.
+type ImageReference struct {
+	LayerID string   `json:"layerId"`
+	AssetID string   `json:"assetId"`
+	Path    []string `json:"path"`
+}
+
+// ImageReferences lists every image layer in document order with its ancestor path.
+func ImageReferences(d model.Document) []ImageReference {
+	out := []ImageReference{}
+	var walk func([]model.Layer, []string)
+	walk = func(ls []model.Layer, path []string) {
+		for _, l := range ls {
+			if l.Kind == "image" {
+				out = append(out, ImageReference{LayerID: l.ID, AssetID: l.AssetID, Path: append(append([]string{}, path...), l.ID)})
+			}
+			walk(l.Children, append(append([]string{}, path...), l.ID))
+		}
+	}
+	walk(d.Layers, nil)
+	return out
+}
+
+// ReplaceAssetIDs returns a copy of the document with every reference to a key
+// in replacements rewritten to its mapped asset id. Non-image layers are untouched.
+func ReplaceAssetIDs(d model.Document, replacements map[string]string) model.Document {
+	var walk func([]model.Layer)
+	walk = func(ls []model.Layer) {
+		for i := range ls {
+			if ls[i].Kind == "image" {
+				if id, ok := replacements[ls[i].AssetID]; ok {
+					ls[i].AssetID = id
+				}
+			}
+			if len(ls[i].Children) > 0 {
+				walk(ls[i].Children)
+			}
+		}
+	}
+	next := model.Clone(d)
+	walk(next.Layers)
+	return next
+}
